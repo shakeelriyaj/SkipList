@@ -30,6 +30,7 @@
 
 #include "gpu_index/common.cuh"
 #include "gpu_index/device_primitives.cuh"
+#include "gpu_index/device_validation.cuh"
 #include "gpu_index/node_layout.hpp"
 #include "gpu_index/validation.hpp"
 
@@ -107,17 +108,23 @@ class GpuOrderedIndex {
     return flatten(to_host_layout(stream));
   }
 
-  // Checks the readme sec. 8.2 invariants. Phase 3 stopgap: copies the index
-  // to the host and runs validate_layout; a device-side validator replaces
-  // this later. Bookkeeping checks run first so a corrupt index is never
-  // walked past its allocation.
+  // Checks the readme sec. 8.2 invariants on the device (device_validation.cuh).
+  // Returns the first violation in validate_layout order. Synchronizes
+  // `stream` once; the only device-to-host traffic is one 8-byte result.
   ValidationResult validate(cudaStream_t stream = 0) const {
+    return detail::validate_packed_layout_device<Key>(keys_.span(), node_max_.span(), size_,
+                                                      NodeCap, stream);
+  }
+
+  // Reference path: copies the whole index to the host and runs
+  // validate_layout. Slow; meant for tests and debugging.
+  ValidationResult validate_on_host(cudaStream_t stream = 0) const {
     using VE = ValidationError;
     const std::size_t nodes = node_max_.size();
     if (nodes != num_nodes_for(size_, NodeCap)) {
       return ValidationResult::failure(VE::NodeCountMismatch, nodes);
     }
-    if (keys_.size() < nodes * NodeCap) {
+    if (keys_.size() / NodeCap < nodes) {
       return ValidationResult::failure(VE::BufferTooSmall, keys_.size());
     }
     return validate_layout(to_host_layout(stream), /*require_packed=*/true);

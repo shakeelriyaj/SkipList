@@ -70,6 +70,18 @@ if(GPU_INDEX_ENABLE_CUDA)
     endfunction()
 
     gpu_index_add_cuda_test(test_build tests/test_build.cu)
+    gpu_index_add_cuda_test(test_validate tests/test_validate.cu)
+
+    # Benchmarks: built with the project, not registered with ctest.
+    function(gpu_index_add_benchmark name source)
+      add_executable(${name} ${source})
+      target_link_libraries(${name} PRIVATE gpu_index_host)
+      target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+      target_compile_options(${name} PRIVATE ${GPU_INDEX_CUDA_FLAGS}
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>)
+    endfunction()
+
+    gpu_index_add_benchmark(bench_validate benchmarks/bench_validate.cu)
   else()
     message(STATUS "No CUDA compiler found: building host-only targets")
   endif()
