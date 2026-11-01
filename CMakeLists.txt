@@ -59,6 +59,17 @@ if(GPU_INDEX_ENABLE_CUDA)
     target_include_directories(smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_compile_options(smoke PRIVATE ${GPU_INDEX_CUDA_FLAGS})
     add_test(NAME smoke COMMAND smoke)
+
+    function(gpu_index_add_cuda_test name source)
+      add_executable(${name} ${source})
+      target_link_libraries(${name} PRIVATE gpu_index_host)
+      target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+      target_compile_options(${name} PRIVATE ${GPU_INDEX_CUDA_FLAGS}
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>)
+      add_test(NAME ${name} COMMAND ${name})
+    endfunction()
+
+    gpu_index_add_cuda_test(test_build tests/test_build.cu)
   else()
     message(STATUS "No CUDA compiler found: building host-only targets")
   endif()
