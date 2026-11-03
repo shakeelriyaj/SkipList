@@ -2,6 +2,11 @@
 
 ## 1. Project Overview
 
+cd ~/skip/SkipList
+module load cuda-12.6
+cmake -S . -B build && cmake --build build -j
+./build/bench_validate
+
 ### 1.1 Objective
 
 Build a GPU-accelerated ordered data structure inspired by skip lists, optimized for high-throughput batch operations rather than low-latency individual updates.

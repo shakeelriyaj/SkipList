@@ -19,6 +19,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -62,7 +63,11 @@ class DeviceSpan {
   std::size_t size() const { return size_; }
   bool empty() const { return size_ == 0; }
 
-  operator DeviceSpan<const T>() const { return {data_, size_}; }
+  // Mutable -> const view. Disabled when T is already const.
+  template <typename U = T, typename = std::enable_if_t<!std::is_const<U>::value>>
+  operator DeviceSpan<const U>() const {
+    return {data_, size_};
+  }
 
  private:
   T* data_ = nullptr;
