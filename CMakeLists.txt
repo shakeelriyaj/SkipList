@@ -71,6 +71,7 @@ if(GPU_INDEX_ENABLE_CUDA)
 
     gpu_index_add_cuda_test(test_build tests/test_build.cu)
     gpu_index_add_cuda_test(test_validate tests/test_validate.cu)
+    gpu_index_add_cuda_test(test_bulk_insert tests/test_bulk_insert.cu)
 
     # Benchmarks: built with the project, not registered with ctest.
     function(gpu_index_add_benchmark name source)
