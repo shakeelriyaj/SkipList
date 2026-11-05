@@ -7,15 +7,23 @@
 // sort_unique_keys(): radix sort + adjacent-unique of an arbitrary device
 // key array (readme sec. 5.1 steps 1-3). The input is never modified.
 //
+// merge_unique_keys(): set union of two sorted, duplicate-free device arrays
+// (readme sec. 5.2 steps 3-4). Used by bulk_insert.
+//
 // fill_node_max(): routing-key kernel for the packed node layout
 // (node_layout.hpp). Reused after every mutation in Phase 4.
 
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_select.cuh>
+#include <thrust/set_operations.h>
+#include <thrust/system/cuda/error.h>
+#include <thrust/system/cuda/execution_policy.h>
+#include <thrust/system/system_error.h>
 
 #include <algorithm>
 #include <climits>
 #include <cstddef>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -78,6 +86,58 @@ std::size_t sort_unique_keys(DeviceSpan<const Key> in, DeviceBuffer<Key>& unique
   GPU_INDEX_CUDA_CHECK(cudaStreamSynchronize(stream));
   if (m < 0 || static_cast<std::size_t>(m) > n) {
     throw std::runtime_error("sort_unique_keys: device returned an invalid unique count");
+  }
+  return static_cast<std::size_t>(m);
+}
+
+// Set union of `a` and `b`, which must each be strictly increasing (sorted,
+// duplicate-free). On return, the first `m` elements of `out` hold the
+// strictly increasing union, where `m` is the return value. out is resized
+// to a.size() + b.size() (the worst case, no overlap); slots past m are
+// unspecified. Neither input is modified. `out` must not alias either input.
+//
+// Because each input is duplicate-free on its own, every key present in both
+// is emitted exactly once, so the result needs no separate unique pass.
+//
+// Runs on `stream` and synchronizes it at most once, because
+// thrust::set_union returns the output end on the host (no sync if either
+// input is empty). Thrust failures are rethrown as cuda_error so callers see
+// one error type.
+template <typename Key>
+std::size_t merge_unique_keys(DeviceSpan<const Key> a, DeviceSpan<const Key> b,
+                              DeviceBuffer<Key>& out, cudaStream_t stream) {
+  const std::size_t total = a.size() + b.size();
+  out.resize_discard(total);
+  if (total == 0) return 0;
+
+  // One side empty: the union is the other side. Skips the Thrust call (and
+  // its sync and scratch allocation).
+  if (a.empty() || b.empty()) {
+    const DeviceSpan<const Key>& src = a.empty() ? b : a;
+    GPU_INDEX_CUDA_CHECK(cudaMemcpyAsync(out.data(), src.data(), src.size() * sizeof(Key),
+                                         cudaMemcpyDeviceToDevice, stream));
+    return src.size();
+  }
+
+  Key* end = nullptr;
+  try {
+    end = thrust::set_union(thrust::cuda::par.on(stream), a.data(), a.data() + a.size(), b.data(),
+                            b.data() + b.size(), out.data());
+  } catch (const thrust::system_error& e) {
+    (void)cudaGetLastError();  // clear non-sticky error state, as cuda_check does
+    const cudaError_t code = e.code().category() == thrust::cuda_category()
+                                 ? static_cast<cudaError_t>(e.code().value())
+                                 : cudaErrorUnknown;
+    throw cuda_error(code, "thrust::set_union", __FILE__, __LINE__);
+  } catch (const std::bad_alloc&) {
+    (void)cudaGetLastError();
+    throw cuda_error(cudaErrorMemoryAllocation, "thrust::set_union (scratch allocation)",
+                     __FILE__, __LINE__);
+  }
+
+  const std::ptrdiff_t m = end - out.data();
+  if (m < 0 || static_cast<std::size_t>(m) > total) {
+    throw std::runtime_error("merge_unique_keys: thrust returned an invalid output end");
   }
   return static_cast<std::size_t>(m);
 }

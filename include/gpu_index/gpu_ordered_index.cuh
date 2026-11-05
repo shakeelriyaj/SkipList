@@ -23,6 +23,22 @@
 //
 // Padding slots are zero-filled so host copies are deterministic, but the
 // contract still treats them as unspecified.
+//
+// bulk_insert contract (readme sec. 5.2):
+//   - Batch is a device span (or a host vector, via bulk_insert_from_host).
+//     It is never modified, may be unsorted, may contain duplicates, and may
+//     alias this index's own key slots.
+//   - Result is the set union of the current keys and the batch. Keys already
+//     present are no-ops. An empty batch, or a batch whose keys are all
+//     already present, leaves the storage untouched (no reallocation).
+//   - Full rebuild: in the packed layout one new key shifts every later key,
+//     so the batch is sorted and deduplicated, merged with the existing
+//     logical keys (padding is never read), then re-laid-out into
+//     ceil(m / NodeCap) nodes with node_max recomputed. Same pipeline as
+//     FlatSortedArray::bulk_insert plus the layout step.
+//   - Synchronizes `stream` at most twice: once for the batch's unique count,
+//     once for the merged size.
+//   - Strong exception guarantee: on failure, *this is unchanged.
 
 #include <cstddef>
 #include <cstdint>
@@ -51,31 +67,33 @@ class GpuOrderedIndex {
   void build(DeviceSpan<const Key> input, cudaStream_t stream = 0) {
     DeviceBuffer<Key> unique;
     const std::size_t m = detail::sort_unique_keys(input, unique, stream);
-    const std::size_t nodes = num_nodes_for(m, NodeCap);
-    const std::size_t slots = nodes * NodeCap;
-
-    DeviceBuffer<Key> keys(slots);
-    DeviceBuffer<Key> node_max(nodes);
-    if (m > 0) {
-      GPU_INDEX_CUDA_CHECK(cudaMemcpyAsync(keys.data(), unique.data(), m * sizeof(Key),
-                                           cudaMemcpyDeviceToDevice, stream));
-      if (slots > m) {
-        GPU_INDEX_CUDA_CHECK(
-            cudaMemsetAsync(keys.data() + m, 0, (slots - m) * sizeof(Key), stream));
-      }
-      detail::fill_node_max(keys.data(), m, NodeCap, nodes, node_max.data(), stream);
-    }
-
-    // Commit only after every call that can throw has succeeded.
-    keys_.swap(keys);
-    node_max_.swap(node_max);
-    size_ = m;
+    assign_sorted(unique.data(), m, stream);
   }
 
   void build_from_host(const std::vector<Key>& input, cudaStream_t stream = 0) {
     DeviceBuffer<Key> staged;
     staged.copy_from_host(input, stream);
     build(staged.span(), stream);
+  }
+
+  void bulk_insert(DeviceSpan<const Key> batch, cudaStream_t stream = 0) {
+    if (batch.empty()) return;
+    DeviceBuffer<Key> incoming;
+    const std::size_t b = detail::sort_unique_keys(batch, incoming, stream);
+    // Only the first size_ slots are keys; the rest of the last node is padding.
+    const DeviceSpan<const Key> current(keys_.data(), size_);
+    DeviceBuffer<Key> merged;
+    const std::size_t m = detail::merge_unique_keys<Key>(
+        current, DeviceSpan<const Key>(incoming.data(), b), merged, stream);
+    if (m == size_) return;  // every batch key was already present
+    assign_sorted(merged.data(), m, stream);
+  }
+
+  void bulk_insert_from_host(const std::vector<Key>& batch, cudaStream_t stream = 0) {
+    if (batch.empty()) return;
+    DeviceBuffer<Key> staged;
+    staged.copy_from_host(batch, stream);
+    bulk_insert(staged.span(), stream);
   }
 
   std::size_t size() const { return size_; }
@@ -131,6 +149,33 @@ class GpuOrderedIndex {
   }
 
  private:
+  // Replaces the contents with the first m keys at `src`, which must be
+  // strictly increasing: lays them out as ceil(m / NodeCap) packed nodes,
+  // zero-fills the padding, and recomputes node_max. Commits only after every
+  // throwing call has succeeded. `src` may be freed once this returns (the
+  // copy is stream-ordered and cudaFree waits for it).
+  void assign_sorted(const Key* src, std::size_t m, cudaStream_t stream) {
+    const std::size_t nodes = num_nodes_for(m, NodeCap);
+    const std::size_t slots = nodes * NodeCap;
+
+    DeviceBuffer<Key> keys(slots);
+    DeviceBuffer<Key> node_max(nodes);
+    if (m > 0) {
+      GPU_INDEX_CUDA_CHECK(
+          cudaMemcpyAsync(keys.data(), src, m * sizeof(Key), cudaMemcpyDeviceToDevice, stream));
+      if (slots > m) {
+        GPU_INDEX_CUDA_CHECK(
+            cudaMemsetAsync(keys.data() + m, 0, (slots - m) * sizeof(Key), stream));
+      }
+      detail::fill_node_max(keys.data(), m, NodeCap, nodes, node_max.data(), stream);
+    }
+
+    // Commit only after every call that can throw has succeeded.
+    keys_.swap(keys);
+    node_max_.swap(node_max);
+    size_ = m;
+  }
+
   DeviceBuffer<Key> keys_;
   DeviceBuffer<Key> node_max_;
   std::size_t size_ = 0;
